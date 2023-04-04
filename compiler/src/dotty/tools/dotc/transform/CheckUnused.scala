@@ -24,6 +24,7 @@ import dotty.tools.dotc.core.Annotations
 import dotty.tools.dotc.core.Definitions
 import dotty.tools.dotc.core.NameKinds.WildcardParamName
 import dotty.tools.dotc.core.Symbols.Symbol
+import dotty.tools.dotc.core.Symbols.ClassSymbol
 
 
 
@@ -35,18 +36,22 @@ import dotty.tools.dotc.core.Symbols.Symbol
  */
 class CheckUnused extends MiniPhase:
   import CheckUnused.UnusedData
+  import CheckUnused.ShadowData
 
   /**
    * The key used to retrieve the "unused entity" analysis metadata,
    * from the compilation `Context`
    */
-  private val _key = Property.Key[UnusedData]
+  private val _unusedKey = Property.Key[UnusedData]
+  private val _shadowKey = Property.Key[ShadowData]
 
   private def unusedDataApply[U](f: UnusedData => U)(using Context): Context =
-    ctx.property(_key).foreach(f)
+    ctx.property(_unusedKey).foreach(f)
     ctx
-  private def getUnusedData(using Context): Option[UnusedData] =
-    ctx.property(_key)
+
+  private def shadowingDataApply[U](f: ShadowData => U)(using Context): Context =
+    ctx.property(_shadowKey).foreach(f)
+    ctx
 
   override def phaseName: String = CheckUnused.phaseName
 
@@ -59,14 +64,17 @@ class CheckUnused extends MiniPhase:
   // ========== SETUP ============
 
   override def prepareForUnit(tree: tpd.Tree)(using Context): Context =
+    val shadowData = ShadowData()
+    val fresh = ctx.fresh.setProperty(_shadowKey, shadowData)
+
     val data = UnusedData()
-    val fresh = ctx.fresh.setProperty(_key, data)
-    fresh
+    fresh.setProperty(_unusedKey, data)
 
   // ========== END + REPORTING ==========
 
   override def transformUnit(tree: tpd.Tree)(using Context): tpd.Tree =
-    unusedDataApply(ud => reportUnused(ud.getUnused))
+    val newCtx = shadowingDataApply(sd => reportShadowing(sd.getPrivatesShadowing))
+    unusedDataApply(ud => reportUnused(ud.getUnused))(using newCtx)
     tree
 
   // ========== MiniPhase Prepare ==========
@@ -104,13 +112,18 @@ class CheckUnused extends MiniPhase:
     pushInBlockTemplatePackageDef(tree)
 
   override def prepareForValDef(tree: tpd.ValDef)(using Context): Context =
+    // If private check for possible clash with inherited symbols
+    val newCtx = shadowingDataApply{sd =>
+      sd.registerPrivateShadows(tree)
+    }
+
     unusedDataApply{ud =>
       // do not register the ValDef generated for `object`
       traverseAnnotations(tree.symbol)
       if !tree.symbol.is(Module) then
         ud.registerDef(tree)
       ud.addIgnoredUsage(tree.symbol)
-    }
+    }(using newCtx)
 
   override def prepareForDefDef(tree: tpd.DefDef)(using Context): Context =
     unusedDataApply{ ud =>
@@ -266,7 +279,19 @@ class CheckUnused extends MiniPhase:
           report.warning(s"unused private member", t)
         case (t, WarnTypes.PatVars) =>
           report.warning(s"unused pattern variable", t)
+        case(t, WarnTypes.PrivateShadowing) =>
+          report.warning(s"A private field is shadowing an inherited field", t)
     }
+
+  private def reportShadowing(res: ShadowData.ShadowResult)(using Context): Unit =
+    import CheckUnused.WarnTypes
+    res.warnings.foreach{ s =>
+       s match
+        case (t, WarnTypes.PrivateShadowing) =>
+          report.warning(s"A private field is shadowing an inherited field", t)
+        case _ => None
+      }
+
 
 end CheckUnused
 
@@ -281,6 +306,46 @@ object CheckUnused:
     case ImplicitParams
     case PrivateMembers
     case PatVars
+    case PrivateShadowing
+
+  private class ShadowData:
+    import dotty.tools.dotc.transform.CheckUnused.ShadowData.ShadowResult
+    import dotty.tools.dotc.transform.CheckUnused.WarnTypes
+    import collection.mutable.{Set => MutSet, Map => MutMap, Stack => MutStack}
+
+    private val shadowingSymbols = MutSet[Symbol]()
+    private val shadowingMemberDef = MutSet[tpd.MemberDef]()
+
+    def registerPrivateShadows(memDef: tpd.MemberDef)(using Context): Unit =
+      if isShadowing(memDef.symbol) then shadowingMemberDef += memDef
+
+    private def isShadowing(sym: Symbol)(using Context): Boolean =
+      val collectedOverridenSyms = collectOverridenSyms(sym)
+      !collectedOverridenSyms.isEmpty
+
+    private def collectOverridenSyms(symDecl: Symbol)(using Context): List[Symbol] =
+      if symDecl.isPrivate then
+        val symDeclType = symDecl.info
+        val bClasses = symDecl.owner.info.baseClasses
+        bClasses match
+          case _ :: inherited =>
+            inherited
+              .map(classSymbol => symDecl.denot.matchingDecl(classSymbol, symDeclType))
+              .filter(sym => sym.name == symDecl.name)
+          case Nil =>
+            Nil
+      else
+        Nil
+
+    def getPrivatesShadowing(using Context): ShadowResult =
+      val ls: List[(dotty.tools.dotc.util.SrcPos, WarnTypes)] =
+        shadowingMemberDef.map(memDef => (memDef.namePos, WarnTypes.PrivateShadowing)).toList
+      ShadowResult(ls)
+  end ShadowData
+
+  private object ShadowData:
+    /** A container for the results of the shadow elements analysis */
+      case class ShadowResult(warnings: List[(dotty.tools.dotc.util.SrcPos, WarnTypes)])
 
   /**
    * A stateful class gathering the infos on :
@@ -443,6 +508,7 @@ object CheckUnused:
       // retrieve previous scope type
       currScopeType.pop
     end popScope
+
 
     /**
      * Leave the scope and return a `List` of unused `ImportSelector`s
