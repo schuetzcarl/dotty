@@ -45,7 +45,7 @@ class CheckShadowing extends MiniPhase:
 
   private def reportShadowing(res: ShadowingData.ShadowResult)(using Context): Unit =
     import CheckShadowing.WarnTypes
-    res.warnings.foreach{ s =>
+    res.warnings.sortBy(_._1.line)(using Ordering[Int]).foreach{ s =>
        s match
         case (t, WarnTypes.PrivateShadowing) =>
           report.warning(s"A private field is shadowing an inherited field", t)
@@ -98,7 +98,7 @@ object CheckShadowing:
         Nil
 
     def getPrivatesShadowing(using Context): ShadowResult =
-      val ls: List[(dotty.tools.dotc.util.SrcPos, WarnTypes)] =
+      val ls: List[(SrcPos, WarnTypes)] =
         shadowedMemberDefs.map(memDef => (memDef.namePos, WarnTypes.PrivateShadowing)).toList
       ShadowResult(ls)
 
