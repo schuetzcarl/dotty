@@ -9,6 +9,7 @@ import dotty.tools.dotc.config.SourceVersion
 import dotty.tools.dotc.core.Contexts._
 import dotty.tools.dotc.rewrites.Rewrites
 import dotty.tools.io.{AbstractFile, Directory, JDK9Reflectors, PlainDirectory}
+import Setting.ChoiceWithHelp
 
 import scala.util.chaining._
 
@@ -155,7 +156,6 @@ private sealed trait VerboseSettings:
  */
 private sealed trait WarningSettings:
   self: SettingGroup =>
-  import Setting.ChoiceWithHelp
 
   val Whelp: Setting[Boolean] = BooleanSetting("-W", "Print a synopsis of warning options.")
   val XfatalWarnings: Setting[Boolean] = BooleanSetting("-Werror", "Fail the compilation if there are any warnings.", aliases = List("-Xfatal-warnings"))
@@ -306,6 +306,19 @@ private sealed trait XSettings:
   }
 
   val XmacroSettings: Setting[List[String]] = MultiStringSetting("-Xmacro-settings", "setting1,setting2,..settingN", "List of settings which exposed to the macros")
+
+  val Xlint: Setting[List[ChoiceWithHelp[String]]] = MultiChoiceHelpSetting(
+    name = "-Xlint",
+    helpArg = "advanced warning",
+    descr = "Enable or disable specific `unused` warnings",
+    choices = List(
+      ChoiceWithHelp("nowarn", ""),
+      ChoiceWithHelp("all",""),
+      ChoiceWithHelp("private-shadow","Warn if a private field or class parameter shadows a superclass field"),
+    ),
+    default = Nil
+  )
+
 end XSettings
 
 /** -Y "Forking" as in forked tongue or "Private" settings */
