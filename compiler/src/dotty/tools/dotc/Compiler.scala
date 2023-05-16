@@ -35,6 +35,7 @@ class Compiler {
   protected def frontendPhases: List[List[Phase]] =
     List(new Parser) ::             // Compiler frontend: scanner, parser
     List(new TyperPhase) ::         // Compiler frontend: namer, typer
+    List(new CheckShadowing) ::
     List(new CheckUnused.PostTyper) ::  // Check for unused elements
     List(new YCheckPositions) ::    // YCheck positions
     List(new sbt.ExtractDependencies) :: // Sends information on classes' dependencies to sbt via callbacks
@@ -51,7 +52,6 @@ class Compiler {
     List(new Inlining) ::           // Inline and execute macros
     List(new PostInlining) ::       // Add mirror support for inlined code
     List(new CheckUnused.PostInlining) ::  // Check for unused elements
-    List(new CheckShadowing) ::
     List(new Staging) ::            // Check staging levels and heal staged types
     List(new Splicing) ::           // Replace level 1 splices with holes
     List(new PickleQuotes) ::       // Turn quoted trees into explicit run-time data structures
