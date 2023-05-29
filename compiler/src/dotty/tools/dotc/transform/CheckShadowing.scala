@@ -33,6 +33,8 @@ import dotty.tools.dotc.core.Denotations.SingleDenotation
 import dotty.tools.dotc.ast.Trees.Ident
 import dotty.tools.dotc.core.Names.TypeName
 import dotty.tools.dotc.core.Names.TermName
+import dotty.tools.dotc.core.Mode.Type
+import dotty.tools.dotc.core.Names.SimpleName
 
 class CheckShadowing extends MiniPhase:
   import CheckShadowing.*
@@ -122,14 +124,12 @@ class CheckShadowing extends MiniPhase:
   // Helpers :
 
   private def reportShadowing(res: ShadowingData.ShadowResult)(using Context): Unit =
-    import CheckShadowing.WarnTypes
-    res.warnings.sortBy(_._1.line)(using Ordering[Int]).foreach { s =>
+    res.warnings.sortBy(w => w.pos.line)(using Ordering[Int]).foreach { s =>
       s match
-        case (t, WarnTypes.PrivateShadowing) =>
-          report.warning(s"A private field is shadowing an inherited field", t)
-        case (t, WarnTypes.TypeParameterShadowing) =>
-          report.warning(s"A type parameter is shadowing a parameter already defined in the scope", t)
-        case _ =>
+        case PrivateShadowWarning(pos, shadow, shadowed) =>
+          report.warning(s"${shadow.showLocated} shadows ${shadowed} inherited from ${shadowed.owner}", pos)
+        case TypeParamShadowWarning(pos, shadow, parent, shadowed) =>
+          report.warning(s"Type parameter ${shadow.name} defined for $parent shadows ${shadowed.showLocated}", pos)
       }
 
   private def nestedTypeTraverser(parent: Symbol) = new TreeTraverser:
@@ -167,24 +167,18 @@ object CheckShadowing:
   val name = "checkShadowing"
   val description = "check for elements shadowing other elements in scope"
 
-  private enum WarnTypes:
-    case PrivateShadowing
-    case TypeParameterShadowing
-
   private class ShadowingData:
-    import dotty.tools.dotc.transform.CheckShadowing.ShadowingData.ShadowResult
-    import dotty.tools.dotc.transform.CheckShadowing.WarnTypes
+    import dotty.tools.dotc.transform.CheckShadowing.ShadowingData._
     import collection.mutable.{Set => MutSet, Map => MutMap, Stack => MutStack}
-
-    private val shadowedPrivateDefs = MutSet[tpd.ValDef]()
 
     private val rootImports = MutSet[SingleDenotation]()
     private val explicitsImports = MutStack[MutSet[tpd.Import]]()
-    private val renamedImports = MutStack[MutMap[String, Name]]()
+    private val renamedImports = MutStack[MutMap[SimpleName, Name]]() // Renamed -> original name
 
     private val typeParamCandidates = MutMap[Symbol, Seq[tpd.TypeDef]]().withDefaultValue(Seq())
-    private val shadowedTypeDefs = MutSet[tpd.TypeDef]()
+    private val shadowedTypeDefs = MutSet[TypeParamShadowWarning]()
 
+    private val shadowedPrivateDefs = MutSet[PrivateShadowWarning]()
 
     def inNewScope()(using Context) =
       explicitsImports.push(MutSet())
@@ -202,7 +196,7 @@ object CheckShadowing:
     def registerImport(imp: tpd.Import)(using Context) =
       val renamedImps = imp.selectors.collect(sel => { sel.renamed match
         case Ident(rename) =>
-          (sel.name.toString, rename)
+          (sel.name.toSimpleName, rename)
       }).toMap
       explicitsImports.top += imp
       renamedImports.top.addAll(renamedImps)
@@ -215,20 +209,23 @@ object CheckShadowing:
     /** Compute if there is some TypeParam shadowing and register if it is the case*/
     def computeTypeParamShadowsFor(parent: Symbol)(using Context): Unit =
         typeParamCandidates(parent).foreach(typeDef => {
+          val sym = typeDef.symbol
           val shadowedType =
-            lookForRootShadowedType(typeDef.symbol)
-              .orElse(lookForImportedShadowedType(typeDef))
-              .orElse(lookForUnitShadowedType(typeDef.symbol))
-          shadowedType match
-            case Some(value) =>
-              if !renamedImports.exists(_.contains(value.name.toString())) then
-                shadowedTypeDefs += typeDef
-            case None =>
+            lookForRootShadowedType(sym)
+              .orElse(lookForImportedShadowedType(sym))
+              .orElse(lookForUnitShadowedType(sym))
+          shadowedType.foreach(shadowed => {
+            if !renamedImports.exists(_.contains(shadowed.name.toSimpleName)) then
+              shadowedTypeDefs += TypeParamShadowWarning(typeDef.srcPos, typeDef.symbol, parent, shadowed)
+          })
         })
 
-    private def lookForImportedShadowedType(typeDef: tpd.TypeDef)(using Context): Option[Symbol] =
+    private def lookForRootShadowedType(symbol: Symbol)(using Context): Option[Symbol] =
+      rootImports.find(p => p.name.toSimpleName == symbol.name.toSimpleName).map(_.symbol)
+
+    private def lookForImportedShadowedType(symbol: Symbol)(using Context): Option[Symbol] =
       explicitsImports
-        .flatMap(_.flatMap(imp => typeDef.symbol.isInImport(imp)))
+        .flatMap(_.flatMap(imp => symbol.isInImport(imp)))
         .headOption
 
     private def lookForUnitShadowedType(symbol: Symbol)(using Context): Option[Symbol] =
@@ -241,18 +238,13 @@ object CheckShadowing:
           case s: Symbol if s.isType => Some(s)
           case _ => lookForUnitShadowedType(symbol)(using ctx.outer)
 
-    private def lookForRootShadowedType(symbol: Symbol)(using Context): Option[Symbol] =
-      if rootImports.exists(p => p.name.toSimpleName == symbol.name.toSimpleName) then Some(symbol) else None
-
-    /** Register a Private Shadows if it is shadowing an inherited field */
+    /** Register if the valDef is a private declaration that shadows an inherited field */
     def registerPrivateShadows(valDef: tpd.ValDef)(using Context): Unit =
-      if isShadowing(valDef.symbol) then shadowedPrivateDefs += valDef
+      lookForShadowedField(valDef.symbol).foreach(overridenSymbol =>
+        shadowedPrivateDefs += PrivateShadowWarning(valDef.startPos, valDef.symbol, overridenSymbol)
+      )
 
-    private def isShadowing(sym: Symbol)(using Context): Boolean =
-      val collectedOverridenSyms = collectOverridenSyms(sym)
-      !collectedOverridenSyms.isEmpty
-
-    private def collectOverridenSyms(symDecl: Symbol)(using Context): List[Symbol] =
+    private def lookForShadowedField(symDecl: Symbol)(using Context): Option[Symbol] =
       if symDecl.isPrivate then
         val symDeclType = symDecl.info
         val bClasses = symDecl.owner.info.baseClasses
@@ -260,28 +252,28 @@ object CheckShadowing:
           case _ :: inherited =>
             inherited
               .map(classSymbol => symDecl.denot.matchingDecl(classSymbol, symDeclType))
-              .filter(sym => sym.name == symDecl.name)
+              .find(sym => sym.name == symDecl.name)
           case Nil =>
-            Nil
+            None
       else
-        Nil
+        None
 
     /** Get the shadowing analysis's result */
     def getShadowingResult(using Context): ShadowResult =
-      val lsPrivateShadow: List[(SrcPos, WarnTypes)] =
+
+      val privateShadowWarnings: List[ShadowWarning] =
         if ctx.settings.XlintHas.privateShadow then
-          shadowedPrivateDefs.map(memDef => (memDef.namePos, WarnTypes.PrivateShadowing)).toList
+          shadowedPrivateDefs.toList
         else
           Nil
-      val lsTypeParamShadow: List[(SrcPos, WarnTypes)] =
+      val typeParamShadowWarnings: List[ShadowWarning] =
         if ctx.settings.XlintHas.typeParameterShadow then
-          shadowedTypeDefs.map(memDef => (memDef.namePos, WarnTypes.TypeParameterShadowing)).toList
+          shadowedTypeDefs.toList
         else
           Nil
-      ShadowResult(lsPrivateShadow ++ lsTypeParamShadow)
+      ShadowResult(privateShadowWarnings ++ typeParamShadowWarnings)
 
     extension (sym: Symbol)
-
       /** Given an import and accessibility, return the import's symbol that matches import<->this symbol */
       private def isInImport(imp: tpd.Import)(using Context): Option[Symbol] =
         val tpd.Import(qual, sels) = imp
@@ -295,7 +287,22 @@ object CheckShadowing:
   end ShadowingData
 
   private object ShadowingData:
-    /** A container for the results of the shadow elements analysis */
-      case class ShadowResult(warnings: List[(SrcPos, WarnTypes)])
+      sealed abstract class ShadowWarning(val pos: SrcPos, val shadow: Symbol, val shadowed: Symbol)
+
+      case class PrivateShadowWarning(
+        override val pos: SrcPos,
+        override val shadow: Symbol,
+        override val shadowed: Symbol
+      ) extends ShadowWarning(pos, shadow, shadowed)
+
+      case class TypeParamShadowWarning(
+        override val pos: SrcPos,
+        override val shadow: Symbol,
+        val shadowParent: Symbol,
+        override val shadowed: Symbol,
+      ) extends ShadowWarning(pos, shadow, shadowed)
+
+      /** A container for the results of the shadow elements analysis */
+      case class ShadowResult(warnings: List[ShadowWarning])
 
 end CheckShadowing
