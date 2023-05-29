@@ -59,80 +59,68 @@ class CheckShadowing extends MiniPhase:
     val fresh = ctx.fresh.setProperty(_key, data)
     shadowingDataApply(sd => sd.registerRootImports())(using fresh)
 
-
   // Reporting on traversal's end
   override def transformUnit(tree: tpd.Tree)(using Context): tpd.Tree =
-    shadowingDataApply( sd =>
-      reportShadowing(sd.getPrivatesShadowing)
+    shadowingDataApply(sd =>
+      reportShadowing(sd.getShadowingResult)
     )
     tree
 
   // MiniPhase traversal work :
+  override def prepareForPackageDef(tree: tpd.PackageDef)(using Context): Context =
+    shadowingDataApply(sd => sd.inNewScope())
+    ctx
+
+  override def prepareForTemplate(tree: tpd.Template)(using Context): Context =
+    shadowingDataApply(sd => sd.inNewScope())
+    ctx
+
+  override def prepareForBlock(tree: tpd.Block)(using Context): Context =
+    shadowingDataApply(sd => sd.inNewScope())
+    ctx
+
+  override def prepareForOther(tree: tpd.Tree)(using Context): Context =
+    importTraverser(tree.symbol).traverse(tree)
+    ctx
+
   override def prepareForValDef(tree: tpd.ValDef)(using Context): Context =
     shadowingDataApply(sd =>
       sd.registerPrivateShadows(tree)
     )
 
   override def prepareForTypeDef(tree: tpd.TypeDef)(using Context): Context =
-    println(s"TAG In prepareForTypeDef : ${tree.symbol}")
-    if tree.symbol.isAliasType then // if alias then traverse to get his first type param
-      typeParamTraverser(tree.symbol).traverse(tree.rhs)
-    if tree.symbol.is(Param) then // if type param then collect the parameter and
+    if tree.symbol.isAliasType then // if alias, the parent is the current symbol
+      nestedTypeTraverser(tree.symbol).traverse(tree.rhs)
+    if tree.symbol.is(Param) then // if param, the parent is up
       val owner = tree.symbol.owner
       val parent = if (owner.isConstructor) then owner.owner else owner
-      typeParamTraverser(parent).traverse(tree.rhs)(using ctx.outer)
+      nestedTypeTraverser(parent).traverse(tree.rhs)(using ctx.outer)
       shadowingDataApply(sd => sd.registerCandidate(parent, tree))
     else
       ctx
 
-  override def prepareForOther(tree: tpd.Tree)(using Context): Context =
-    importTraverser(tree.symbol).traverse(tree)
-    ctx
-
-  override def prepareForPackageDef(tree: tpd.PackageDef)(using Context): Context =
-    shadowingDataApply(sd =>{
-      sd.inNewScope()
-    })
-    ctx
 
   override def transformPackageDef(tree: tpd.PackageDef)(using Context): tpd.Tree =
-    shadowingDataApply(sd => {
-      sd.outOfScope()
-    })
+    shadowingDataApply(sd => sd.outOfScope())
     tree
-
-  override def prepareForBlock(tree: tpd.Block)(using Context): Context =
-    shadowingDataApply(sd => {
-      sd.inNewScope()
-    })
-    ctx
 
   override def transformBlock(tree: tpd.Block)(using Context): tpd.Tree =
-    shadowingDataApply(sd => {
-      sd.outOfScope()
-    })
+    shadowingDataApply(sd => sd.outOfScope())
     tree
 
-  override def prepareForTemplate(tree: tpd.Template)(using Context): Context =
-    shadowingDataApply(sd => {
-      sd.inNewScope()
-    })
-    ctx
-
   override def transformTemplate(tree: tpd.Template)(using Context): tpd.Tree =
-    shadowingDataApply(sd => {
-      sd.outOfScope()
-    })
+    shadowingDataApply(sd => sd.outOfScope())
     tree
 
   override def transformTypeDef(tree: tpd.TypeDef)(using Context): tpd.Tree =
     if tree.symbol.is(Param) && !tree.symbol.owner.isConstructor then // Do not register for constructors the work is done for the Class owned equivalent TypeDef
       shadowingDataApply(sd => sd.computeTypeParamShadowsFor(tree.symbol.owner)(using ctx.outer))
-    if tree.symbol.isAliasType then
-      shadowingDataApply(sd => sd.computeTypeParamShadowsFor(tree.symbol)(using ctx)) // No need to start outer here, because the TypeDef reached here it's already the parent
+    if tree.symbol.isAliasType then // No need to start outer here, because the TypeDef reached here it's already the parent
+      shadowingDataApply(sd => sd.computeTypeParamShadowsFor(tree.symbol)(using ctx))
     tree
 
-  // CheckShadowing Helpers :
+  // Helpers :
+
   private def reportShadowing(res: ShadowingData.ShadowResult)(using Context): Unit =
     import CheckShadowing.WarnTypes
     res.warnings.sortBy(_._1.line)(using Ordering[Int]).foreach { s =>
@@ -144,21 +132,22 @@ class CheckShadowing extends MiniPhase:
         case _ =>
       }
 
-  private def typeParamTraverser(parent: Symbol) = new TreeTraverser:
+  private def nestedTypeTraverser(parent: Symbol) = new TreeTraverser:
     import tpd._
 
     override def traverse(tree: tpd.Tree)(using Context): Unit =
       tree match
         case t:tpd.TypeDef =>
-          val newCtx = shadowingDataApply(sd => {
+          val newCtx = shadowingDataApply(sd =>
             sd.registerCandidate(parent, t)
-          })
+          )
           traverseChildren(tree)(using newCtx)
         case _ =>
           traverseChildren(tree)
     end traverse
-  end typeParamTraverser
+  end nestedTypeTraverser
 
+  // To reach the imports during a miniphase traversal
   private def importTraverser(parent: Symbol) = new TreeTraverser:
     import tpd._
 
@@ -190,24 +179,26 @@ object CheckShadowing:
     private val shadowedPrivateDefs = MutSet[tpd.ValDef]()
 
     private val rootImports = MutSet[SingleDenotation]()
-    private val explicitsImports = MutStack[MutSet[tpd.Import]]() // contains also the renamed symbol out the aliased imports
+    private val explicitsImports = MutStack[MutSet[tpd.Import]]()
     private val renamedImports = MutStack[MutMap[String, Name]]()
 
     private val typeParamCandidates = MutMap[Symbol, Seq[tpd.TypeDef]]().withDefaultValue(Seq())
     private val shadowedTypeDefs = MutSet[tpd.TypeDef]()
+
 
     def inNewScope()(using Context) =
       explicitsImports.push(MutSet())
       renamedImports.push(MutMap())
 
     def outOfScope()(using Context) =
-      println(s"${renamedImports}")
       explicitsImports.pop()
       renamedImports.pop()
 
+    /** Register the Root imports (at once per compilation unit)*/
     def registerRootImports()(using Context) =
       rootImports.addAll(ctx.definitions.rootImportTypes.flatMap(_.typeMembers))
 
+    /* Register an import encountered in the current scope **/
     def registerImport(imp: tpd.Import)(using Context) =
       val renamedImps = imp.selectors.collect(sel => { sel.renamed match
         case Ident(rename) =>
@@ -216,42 +207,35 @@ object CheckShadowing:
       explicitsImports.top += imp
       renamedImports.top.addAll(renamedImps)
 
-    def printParentToTypeDefs() =
-      println(typeParamCandidates.map((sy, seq) => (sy, seq.map(t => t.name))))
-
+    /** Register a potential type definition which could shadows a Type already defined */
     def registerCandidate(parent: Symbol, typeDef: tpd.TypeDef) =
       val actual = typeParamCandidates.getOrElseUpdate(parent, Seq())
       typeParamCandidates.update(parent, actual.+:(typeDef))
 
+    /** Compute if there is some TypeParam shadowing and register if it is the case*/
     def computeTypeParamShadowsFor(parent: Symbol)(using Context): Unit =
-        // Test check is in import :
         typeParamCandidates(parent).foreach(typeDef => {
-          val res =
+          val shadowedType =
             lookForRootShadowedType(typeDef.symbol)
               .orElse(lookForImportedShadowedType(typeDef))
               .orElse(lookForUnitShadowedType(typeDef.symbol))
-          res match
+          shadowedType match
             case Some(value) =>
-              println(s"SymFuund: ${value.name}")
               if !renamedImports.exists(_.contains(value.name.toString())) then
-                println(s"is found in roots : ${lookForRootShadowedType(typeDef.symbol)}")
                 shadowedTypeDefs += typeDef
             case None =>
         })
 
     private def lookForImportedShadowedType(typeDef: tpd.TypeDef)(using Context): Option[Symbol] =
-      var res: Symbol = NoSymbol
-      explicitsImports.flatMap(_.flatMap(imp => {
-            println(s"Is in import ${imp.expr.symbol.name}: ${typeDef.symbol.isInImport(imp)}")
-            typeDef.symbol.isInImport(imp)
-          })).headOption
+      explicitsImports
+        .flatMap(_.flatMap(imp => typeDef.symbol.isInImport(imp)))
+        .headOption
 
     private def lookForUnitShadowedType(symbol: Symbol)(using Context): Option[Symbol] =
       if !ctx.owner.exists then
         None
       else
         val declarationScope = ctx.effectiveScope
-        //declarationScope.toList.foreach(s => println(s.name))
         val res = declarationScope.lookup(symbol.name)
         res match
           case s: Symbol if s.isType => Some(s)
@@ -260,6 +244,7 @@ object CheckShadowing:
     private def lookForRootShadowedType(symbol: Symbol)(using Context): Option[Symbol] =
       if rootImports.exists(p => p.name.toSimpleName == symbol.name.toSimpleName) then Some(symbol) else None
 
+    /** Register a Private Shadows if it is shadowing an inherited field */
     def registerPrivateShadows(valDef: tpd.ValDef)(using Context): Unit =
       if isShadowing(valDef.symbol) then shadowedPrivateDefs += valDef
 
@@ -281,7 +266,8 @@ object CheckShadowing:
       else
         Nil
 
-    def getPrivatesShadowing(using Context): ShadowResult =
+    /** Get the shadowing analysis's result */
+    def getShadowingResult(using Context): ShadowResult =
       val lsPrivateShadow: List[(SrcPos, WarnTypes)] =
         if ctx.settings.XlintHas.privateShadow then
           shadowedPrivateDefs.map(memDef => (memDef.namePos, WarnTypes.PrivateShadowing)).toList
@@ -295,45 +281,16 @@ object CheckShadowing:
       ShadowResult(lsPrivateShadow ++ lsTypeParamShadow)
 
     extension (sym: Symbol)
-      /** is accessible without import in current context */
-      private def isAccessibleAsIdent(using Context): Boolean =
-        sym.exists &&
-          ctx.outersIterator.exists{ c =>
-            c.owner == sym.owner
-            || sym.owner.isClass && c.owner.isClass
-                && c.owner.thisType.baseClasses.contains(sym.owner)
-                && c.owner.thisType.member(sym.name).alternatives.contains(sym)
-          }
 
-      /** Given an import and accessibility, return selector that matches import<->symbol */
+      /** Given an import and accessibility, return the import's symbol that matches import<->this symbol */
       private def isInImport(imp: tpd.Import)(using Context): Option[Symbol] =
         val tpd.Import(qual, sels) = imp
         val simpleSelections = qual.tpe.member(sym.name).alternatives
         val typeSelections = sels.flatMap(n => qual.tpe.member(n.name.toTypeName).alternatives)
-        println(s"simpleSelections : ${simpleSelections}")
-        println(s"typeSelections : ${typeSelections}")
-        //println(s"rootImportTypes : ${ctx.definitions.rootImportTypes.flatMap(_.typeMembers)}")
 
-        sels.find(is => is.rename.toSimpleName == sym.name.toSimpleName).map(_.symbol).orElse(
-        typeSelections.map(_.symbol).find(sd =>{
-          println(sym.name)
-          println(sd.name)
-          sd.name == sym.name
-        })).orElse(simpleSelections.map(_.symbol)find(sd => sd.name == sym.name))
-
-      private def dealias(symbol: Symbol)(using Context): Symbol =
-        if(symbol.isType && symbol.asType.denot.isAliasType) then
-          symbol.asType.typeRef.dealias.typeSymbol
-        else symbol
-
-      private def isRenamedSymbol(symNameInScope: Option[Name])(using Context) =
-        sym.name != nme.NO_NAME && symNameInScope.exists(_.toSimpleName != sym.name.toSimpleName)
-
-    extension (tree: ImportSelector)
-      def boundTpe: Type = tree.bound match {
-        case untpd.TypedSplice(tree1) => tree1.tpe
-        case _ => NoType
-      }
+        sels.find(is => is.rename.toSimpleName == sym.name.toSimpleName).map(_.symbol)
+          .orElse(typeSelections.map(_.symbol).find(sd => sd.name == sym.name))
+          .orElse(simpleSelections.map(_.symbol).find(sd => sd.name == sym.name))
 
   end ShadowingData
 
