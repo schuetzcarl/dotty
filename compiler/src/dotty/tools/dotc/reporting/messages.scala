@@ -1981,7 +1981,11 @@ class UnapplyInvalidReturnType(unapplyResult: Type, unapplyName: Name)(using Con
         |To be used as an extractor, an unapply method has to return a type that either:
         | - has members ${Magenta("isEmpty: Boolean")} and ${Magenta("get: S")} (usually an ${Green("Option[S]")})
         | - is a ${Green("Boolean")}
-        | - is a ${Green("Product")} (like a ${Magenta("Tuple2[T1, T2]")})
+        | - is a ${Green("Product")} (like a ${Magenta("Tuple2[T1, T2]")}) of arity i with i >= 1, and has members _1 to _i
+        |
+        |See: https://docs.scala-lang.org/scala3/reference/changed-features/pattern-matching.html#fixed-arity-extractors
+        |
+        |Examples:
         |
         |class A(val i: Int)
         |
@@ -2282,6 +2286,16 @@ class PureExpressionInStatementPosition(stat: untpd.Tree, val exprOwner: Symbol)
   def explain(using Context) =
     i"""The pure expression $stat doesn't have any side effect and its result is not assigned elsewhere.
         |It can be removed without changing the semantics of the program. This may indicate an error."""
+}
+
+class UnqualifiedCallToAnyRefMethod(stat: untpd.Tree, method: Symbol)(using Context)
+  extends Message(UnqualifiedCallToAnyRefMethodID) {
+  def kind = MessageKind.PotentialIssue
+  def msg(using Context) = i"Suspicious top-level unqualified call to ${hl(method.name.toString)}"
+  def explain(using Context) =
+    i"""Top-level unqualified calls to ${hl("AnyRef")} or ${hl("Any")} methods such as ${hl(method.name.toString)} are
+       |resolved to calls on ${hl("Predef")} or on imported methods. This might not be what
+       |you intended."""
 }
 
 class TraitCompanionWithMutableStatic()(using Context)

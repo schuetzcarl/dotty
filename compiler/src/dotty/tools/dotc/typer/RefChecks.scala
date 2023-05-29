@@ -1090,6 +1090,12 @@ object RefChecks {
 
   end checkImplicitNotFoundAnnotation
 
+  def checkAnyRefMethodCall(tree: Tree)(using Context) =
+    if tree.symbol.exists
+       && defn.topClasses.contains(tree.symbol.owner)
+       && (!ctx.owner.enclosingClass.exists || ctx.owner.enclosingClass.isPackageObject) then
+      report.warning(UnqualifiedCallToAnyRefMethod(tree, tree.symbol), tree)
+
 }
 import RefChecks._
 
@@ -1168,6 +1174,11 @@ class RefChecks extends MiniPhase { thisPhase =>
       report.error(ex, tree.srcPos)
       tree
   }
+
+  override def transformIdent(tree: Ident)(using Context): Tree =
+    checkAnyRefMethodCall(tree)
+    tree
+
 }
 
 /* todo: rewrite and re-enable

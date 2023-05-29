@@ -80,7 +80,7 @@ object DottyJSPlugin extends AutoPlugin {
 object Build {
   import ScaladocConfigs._
 
-  val referenceVersion = "3.3.0-RC5"
+  val referenceVersion = "3.3.0"
 
   val baseVersion = "3.3.1-RC1"
 
@@ -98,7 +98,7 @@ object Build {
    *  set to 3.1.3. If it is going to be 3.1.0, it must be set to the latest
    *  3.0.x release.
    */
-  val previousDottyVersion = "3.2.2"
+  val previousDottyVersion = "3.3.0"
 
   object CompatMode {
     final val BinaryCompatible = 0
@@ -922,26 +922,22 @@ object Build {
       javaOptions := (`scala3-compiler-bootstrapped` / javaOptions).value
     )
 
-  /** Scala library compiled by dotty using the latest published sources of the library */
+  /** Scala 2 library compiled by dotty using the latest published sources of the library.
+   *
+   *  This version of the library is not (yet) TASTy/binary compatible with the Scala 2 compiled library.
+   */
   lazy val `stdlib-bootstrapped` = project.in(file("stdlib-bootstrapped")).
     withCommonSettings(Bootstrapped).
     dependsOn(dottyCompiler(Bootstrapped) % "provided; compile->runtime; test->test").
-    dependsOn(`scala3-tasty-inspector` % "test->test").
     settings(commonBootstrappedSettings).
     settings(
       moduleName := "scala-library",
       javaOptions := (`scala3-compiler-bootstrapped` / javaOptions).value,
-      Compile/scalacOptions += "-Yerased-terms",
-      Compile/scalacOptions ++= {
-        Seq(
-          "-sourcepath",
-          Seq(
-            (Compile/sourceManaged).value / "scala-library-src",
-            (Compile/sourceManaged).value / "dotty-library-src",
-          ).mkString(File.pathSeparator),
-        )
+      Compile / scalacOptions ++= {
+        Seq("-sourcepath", ((Compile/sourceManaged).value / "scala-library-src").toString)
       },
       Compile / doc / scalacOptions += "-Ydocument-synthetic-types",
+      scalacOptions += "-Yscala2-stdlib",
       scalacOptions -= "-Xfatal-warnings",
       ivyConfigurations += SourceDeps.hide,
       transitiveClassifiers := Seq("sources"),
@@ -971,36 +967,6 @@ object Build {
           ((trgDir ** "*.scala") +++ (trgDir ** "*.java")).get.toSet
         } (Set(scalaLibrarySourcesJar)).toSeq
       }.taskValue,
-      (Compile / sourceGenerators) += Def.task {
-        val s = streams.value
-        val cacheDir = s.cacheDirectory
-        val trgDir = (Compile / sourceManaged).value / "dotty-library-src"
-
-        // NOTE `sourceDirectory` is used for actual copying,
-        // but `sources` are used as cache keys
-        val dottyLibSourceDirs = (`scala3-library-bootstrapped`/Compile/unmanagedSourceDirectories).value
-        def dottyLibSources = dottyLibSourceDirs.foldLeft(PathFinder.empty) { (pf, dir) =>
-          if (!dir.exists) pf else pf +++ (dir ** "*.scala") +++ (dir ** "*.java")
-        }
-
-        val cachedFun = FileFunction.cached(
-          cacheDir / s"copyDottyLibrarySrc",
-          FilesInfo.lastModified,
-          FilesInfo.exists,
-        ) { _ =>
-          if (trgDir.exists) IO.delete(trgDir)
-          dottyLibSourceDirs.foreach { dir =>
-            if (dir.exists) {
-              s.log.info(s"Copying scala3-library sources from $dir to $trgDir...")
-              IO.copyDirectory(dir, trgDir)
-            }
-          }
-
-          ((trgDir ** "*.scala") +++ (trgDir ** "*.java")).get.toSet
-        }
-
-        cachedFun(dottyLibSources.get.toSet).toSeq
-      }.taskValue,
       (Compile / sources) ~= (_.filterNot(file =>
         // sources from https://github.com/scala/scala/tree/2.13.x/src/library-aux
         file.getPath.endsWith("scala-library-src/scala/Any.scala") ||
@@ -1009,9 +975,29 @@ object Build {
         file.getPath.endsWith("scala-library-src/scala/Nothing.scala") ||
         file.getPath.endsWith("scala-library-src/scala/Null.scala") ||
         file.getPath.endsWith("scala-library-src/scala/Singleton.scala"))),
+      (Compile / sources) := {
+        val files = (Compile / sources).value
+        val overwritenSourcesDir = (Compile / scalaSource).value
+        val overwritenSources = files.flatMap(_.relativeTo(overwritenSourcesDir)).toSet
+        val reference = (Compile/sourceManaged).value / "scala-library-src"
+        files.filterNot(_.relativeTo(reference).exists(overwritenSources))
+      },
       (Test / managedClasspath) ~= {
         _.filterNot(file => file.data.getName == s"scala-library-${stdlibVersion(Bootstrapped)}.jar")
       },
+      mimaCheckDirection := "both",
+      mimaBackwardIssueFilters := MiMaFilters.StdlibBootstrappedBackwards,
+      mimaForwardIssueFilters := MiMaFilters.StdlibBootstrappedForward,
+      mimaPreviousArtifacts += "org.scala-lang" % "scala-library" % stdlibVersion(Bootstrapped),
+      mimaExcludeAnnotations ++= Seq(
+        "scala.annotation.experimental",
+        "scala.annotation.specialized",
+        "scala.annotation.unspecialized",
+      ),
+      // TODO package only TASTy files.
+      // We first need to check that a project can depend on a JAR that only contains TASTy files.
+      // Compile / exportJars := true,
+      // Compile / packageBin / mappings ~= { _.filter(_._2.endsWith(".tasty")) },
     )
 
   /** Test the tasty generated by `stdlib-bootstrapped`
@@ -1949,7 +1935,7 @@ object ScaladocConfigs {
   }
 
   lazy val DefaultGenerationConfig = Def.task {
-    def distLocation = (dist / pack).value
+    def distLocation = (dist / Compile / pack).value
     DefaultGenerationSettings.value
   }
 

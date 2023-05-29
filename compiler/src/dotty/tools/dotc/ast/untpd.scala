@@ -148,7 +148,7 @@ object untpd extends Trees.Instance[Untyped] with UntypedTreeInfo {
   }
 
   /** {x1, ..., xN} T   (only relevant under captureChecking) */
-  case class CapturingTypeTree(refs: List[Tree], parent: Tree)(implicit @constructorOnly src: SourceFile) extends TypTree
+  case class CapturesAndResult(refs: List[Tree], parent: Tree)(implicit @constructorOnly src: SourceFile) extends TypTree
 
   /** Short-lived usage in typer, does not need copy/transform/fold infrastructure */
   case class DependentTypeTree(tp: List[Symbol] => Type)(implicit @constructorOnly src: SourceFile) extends Tree
@@ -397,8 +397,9 @@ object untpd extends Trees.Instance[Untyped] with UntypedTreeInfo {
   def SeqLiteral(elems: List[Tree], elemtpt: Tree)(implicit src: SourceFile): SeqLiteral = new SeqLiteral(elems, elemtpt)
   def JavaSeqLiteral(elems: List[Tree], elemtpt: Tree)(implicit src: SourceFile): JavaSeqLiteral = new JavaSeqLiteral(elems, elemtpt)
   def Inlined(call: tpd.Tree, bindings: List[MemberDef], expansion: Tree)(implicit src: SourceFile): Inlined = new Inlined(call, bindings, expansion)
-  def Quote(body: Tree)(implicit src: SourceFile): Quote = new Quote(body)
+  def Quote(body: Tree, tags: List[Tree])(implicit src: SourceFile): Quote = new Quote(body, tags)
   def Splice(expr: Tree)(implicit src: SourceFile): Splice = new Splice(expr)
+  def SplicePattern(body: Tree, args: List[Tree])(implicit src: SourceFile): SplicePattern = new SplicePattern(body, args)
   def TypeTree()(implicit src: SourceFile): TypeTree = new TypeTree()
   def InferredTypeTree()(implicit src: SourceFile): TypeTree = new InferredTypeTree()
   def SingletonTypeTree(ref: Tree)(implicit src: SourceFile): SingletonTypeTree = new SingletonTypeTree(ref)
@@ -424,7 +425,7 @@ object untpd extends Trees.Instance[Untyped] with UntypedTreeInfo {
   def Export(expr: Tree, selectors: List[ImportSelector])(implicit src: SourceFile): Export = new Export(expr, selectors)
   def PackageDef(pid: RefTree, stats: List[Tree])(implicit src: SourceFile): PackageDef = new PackageDef(pid, stats)
   def Annotated(arg: Tree, annot: Tree)(implicit src: SourceFile): Annotated = new Annotated(arg, annot)
-  def Hole(isTermHole: Boolean, idx: Int, args: List[Tree], content: Tree, tpt: Tree)(implicit src: SourceFile): Hole = new Hole(isTermHole, idx, args, content, tpt)
+  def Hole(isTerm: Boolean, idx: Int, args: List[Tree], content: Tree)(implicit src: SourceFile): Hole = new Hole(isTerm, idx, args, content)
 
   // ------ Additional creation methods for untyped only -----------------
 
@@ -500,6 +501,9 @@ object untpd extends Trees.Instance[Untyped] with UntypedTreeInfo {
 
   def captureRoot(using Context): Select =
     Select(scalaDot(nme.caps), nme.CAPTURE_ROOT)
+
+  def makeRetaining(parent: Tree, refs: List[Tree], annotName: TypeName)(using Context): Annotated =
+    Annotated(parent, New(scalaAnnotationDot(annotName), List(refs)))
 
   def makeConstructor(tparams: List[TypeDef], vparamss: List[List[ValDef]], rhs: Tree = EmptyTree)(using Context): DefDef =
     DefDef(nme.CONSTRUCTOR, joinParams(tparams, vparamss), TypeTree(), rhs)
@@ -658,9 +662,9 @@ object untpd extends Trees.Instance[Untyped] with UntypedTreeInfo {
       case tree: Number if (digits == tree.digits) && (kind == tree.kind) => tree
       case _ => finalize(tree, untpd.Number(digits, kind))
     }
-    def CapturingTypeTree(tree: Tree)(refs: List[Tree], parent: Tree)(using Context): Tree = tree match
-      case tree: CapturingTypeTree if (refs eq tree.refs) && (parent eq tree.parent) => tree
-      case _ => finalize(tree, untpd.CapturingTypeTree(refs, parent))
+    def CapturesAndResult(tree: Tree)(refs: List[Tree], parent: Tree)(using Context): Tree = tree match
+      case tree: CapturesAndResult if (refs eq tree.refs) && (parent eq tree.parent) => tree
+      case _ => finalize(tree, untpd.CapturesAndResult(refs, parent))
 
     def TypedSplice(tree: Tree)(splice: tpd.Tree)(using Context): ProxyTree = tree match {
       case tree: TypedSplice if splice `eq` tree.splice => tree
@@ -723,8 +727,8 @@ object untpd extends Trees.Instance[Untyped] with UntypedTreeInfo {
         tree
       case MacroTree(expr) =>
         cpy.MacroTree(tree)(transform(expr))
-      case CapturingTypeTree(refs, parent) =>
-        cpy.CapturingTypeTree(tree)(transform(refs), transform(parent))
+      case CapturesAndResult(refs, parent) =>
+        cpy.CapturesAndResult(tree)(transform(refs), transform(parent))
       case _ =>
         super.transformMoreCases(tree)
     }
@@ -782,7 +786,7 @@ object untpd extends Trees.Instance[Untyped] with UntypedTreeInfo {
         this(x, splice)
       case MacroTree(expr) =>
         this(x, expr)
-      case CapturingTypeTree(refs, parent) =>
+      case CapturesAndResult(refs, parent) =>
         this(this(x, refs), parent)
       case _ =>
         super.foldMoreCases(x, tree)

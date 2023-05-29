@@ -106,7 +106,7 @@ class Definitions {
    *      }
    *  ImpureXYZFunctionN follow this template:
    *
-   *      type ImpureXYZFunctionN[-T0,...,-T{N-1}, +R] = {*} XYZFunctionN[T0,...,T{N-1}, R]
+   *      type ImpureXYZFunctionN[-T0,...,-T{N-1}, +R] = {cap} XYZFunctionN[T0,...,T{N-1}, R]
    */
   private def newFunctionNType(name: TypeName): Symbol = {
     val impure = name.startsWith("Impure")
@@ -688,6 +688,7 @@ class Definitions {
   @tu lazy val JavaCalendarClass: ClassSymbol = requiredClass("java.util.Calendar")
   @tu lazy val JavaDateClass: ClassSymbol = requiredClass("java.util.Date")
   @tu lazy val JavaFormattableClass: ClassSymbol = requiredClass("java.util.Formattable")
+  @tu lazy val JavaRecordClass: Symbol = getClassIfDefined("java.lang.Record")
 
   @tu lazy val JavaEnumClass: ClassSymbol = {
     val cls = requiredClass("java.lang.Enum")
@@ -968,11 +969,12 @@ class Definitions {
   @tu lazy val BreakClass: Symbol = requiredClass("scala.util.boundary.Break")
 
   @tu lazy val CapsModule: Symbol = requiredModule("scala.caps")
-    @tu lazy val captureRoot: TermSymbol = CapsModule.requiredValue("*")
+    @tu lazy val captureRoot: TermSymbol = CapsModule.requiredValue("cap")
     @tu lazy val CapsUnsafeModule: Symbol = requiredModule("scala.caps.unsafe")
     @tu lazy val Caps_unsafeBox: Symbol = CapsUnsafeModule.requiredMethod("unsafeBox")
     @tu lazy val Caps_unsafeUnbox: Symbol = CapsUnsafeModule.requiredMethod("unsafeUnbox")
     @tu lazy val Caps_unsafeBoxFunArg: Symbol = CapsUnsafeModule.requiredMethod("unsafeBoxFunArg")
+    @tu lazy val Caps_SealedAnnot: ClassSymbol = requiredClass("scala.caps.Sealed")
 
   // Annotation base classes
   @tu lazy val AnnotationClass: ClassSymbol = requiredClass("scala.annotation.Annotation")
@@ -1021,6 +1023,7 @@ class Definitions {
   @tu lazy val UncheckedAnnot: ClassSymbol = requiredClass("scala.unchecked")
   @tu lazy val UncheckedStableAnnot: ClassSymbol = requiredClass("scala.annotation.unchecked.uncheckedStable")
   @tu lazy val UncheckedVarianceAnnot: ClassSymbol = requiredClass("scala.annotation.unchecked.uncheckedVariance")
+  @tu lazy val UncheckedCapturesAnnot: ClassSymbol = requiredClass("scala.annotation.unchecked.uncheckedCaptures")
   @tu lazy val VolatileAnnot: ClassSymbol = requiredClass("scala.volatile")
   @tu lazy val WithPureFunsAnnot: ClassSymbol = requiredClass("scala.annotation.internal.WithPureFuns")
   @tu lazy val BeanGetterMetaAnnot: ClassSymbol = requiredClass("scala.annotation.meta.beanGetter")

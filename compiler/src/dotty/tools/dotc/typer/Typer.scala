@@ -608,7 +608,7 @@ class Typer(@constructorOnly nestingLevel: Int = 0) extends Namer
       ownType match
         case ownType: TermRef if ownType.symbol.is(ConstructorProxy) =>
           findRef(name, pt, EmptyFlags, ConstructorProxy, tree.srcPos) match
-            case shadowed: TermRef =>
+            case shadowed: TermRef if !shadowed.symbol.maybeOwner.isEmptyPackage =>
               pt match
                 case pt: FunOrPolyProto =>
                   def err(shadowedIsApply: Boolean) =
@@ -1389,6 +1389,11 @@ class Typer(@constructorOnly nestingLevel: Int = 0) extends Namer
 
   def typedFunctionType(tree: untpd.Function, pt: Type)(using Context): Tree = {
     val untpd.Function(args, body) = tree
+    body match
+      case untpd.CapturesAndResult(refs, result) =>
+        return typedUnadapted(untpd.makeRetaining(
+          cpy.Function(tree)(args, result), refs, tpnme.retains), pt)
+      case _ =>
     var (funFlags, erasedParams) = tree match {
       case tree: untpd.FunctionWithMods => (tree.mods.flags, tree.erasedParams)
       case _ => (EmptyFlags, args.map(_ => false))
@@ -2274,10 +2279,13 @@ class Typer(@constructorOnly nestingLevel: Int = 0) extends Namer
     assignType(cpy.MatchTypeTree(tree)(bound1, sel1, cases1), bound1, sel1, cases1)
   }
 
-  def typedByNameTypeTree(tree: untpd.ByNameTypeTree)(using Context): ByNameTypeTree = {
-    val result1 = typed(tree.result)
-    assignType(cpy.ByNameTypeTree(tree)(result1), result1)
-  }
+  def typedByNameTypeTree(tree: untpd.ByNameTypeTree)(using Context): ByNameTypeTree = tree.result match
+    case untpd.CapturesAndResult(refs, tpe) =>
+      typedByNameTypeTree(
+        cpy.ByNameTypeTree(tree)(untpd.makeRetaining(tpe, refs, tpnme.retainsByName)))
+    case _ =>
+      val result1 = typed(tree.result)
+      assignType(cpy.ByNameTypeTree(tree)(result1), result1)
 
   def typedTypeBoundsTree(tree: untpd.TypeBoundsTree, pt: Type)(using Context): Tree =
     val TypeBoundsTree(lo, hi, alias) = tree
@@ -2433,11 +2441,17 @@ class Typer(@constructorOnly nestingLevel: Int = 0) extends Namer
   }
 
   def typedDefDef(ddef: untpd.DefDef, sym: Symbol)(using Context): Tree = {
-    if (!sym.info.exists) { // it's a discarded synthetic case class method, drop it
-      assert(sym.is(Synthetic) && desugar.isRetractableCaseClassMethodName(sym.name))
+    def canBeInvalidated(sym: Symbol): Boolean =
+      sym.is(Synthetic)
+      && (desugar.isRetractableCaseClassMethodName(sym.name) ||
+        (sym.isConstructor && sym.owner.derivesFrom(defn.JavaRecordClass)))
+
+    if !sym.info.exists then
+      // it's a discarded method (synthetic case class method or synthetic java record constructor), drop it
+      assert(canBeInvalidated(sym))
       sym.owner.info.decls.openForMutations.unlink(sym)
       return EmptyTree
-    }
+
     // TODO: - Remove this when `scala.language.experimental.erasedDefinitions` is no longer experimental.
     //       - Modify signature to `erased def erasedValue[T]: T`
     if sym.eq(defn.Compiletime_erasedValue) then
@@ -3088,6 +3102,7 @@ class Typer(@constructorOnly nestingLevel: Int = 0) extends Namer
           case untpd.EmptyTree => tpd.EmptyTree
           case tree: untpd.Quote => typedQuote(tree, pt)
           case tree: untpd.Splice => typedSplice(tree, pt)
+          case tree: untpd.SplicePattern => typedSplicePattern(tree, pt)
           case tree: untpd.MacroTree => report.error("Unexpected macro", tree.srcPos); tpd.nullLiteral  // ill-formed code may reach here
           case tree: untpd.Hole => typedHole(tree, pt)
           case _ => typedUnadapted(desugar(tree, pt), pt, locked)
@@ -3589,7 +3604,7 @@ class Typer(@constructorOnly nestingLevel: Int = 0) extends Namer
     adapt(tree, pt, ctx.typerState.ownedVars)
 
   private def adapt1(tree: Tree, pt: Type, locked: TypeVars)(using Context): Tree = {
-    assert(pt.exists && !pt.isInstanceOf[ExprType] || ctx.reporter.errorsReported)
+    assert(pt.exists && !pt.isInstanceOf[ExprType] || ctx.reporter.errorsReported, i"tree: $tree, pt: $pt")
     def methodStr = err.refStr(methPart(tree).tpe)
 
     def readapt(tree: Tree)(using Context) = adapt(tree, pt, locked)

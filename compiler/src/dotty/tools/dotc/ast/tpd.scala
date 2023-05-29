@@ -170,11 +170,14 @@ object tpd extends Trees.Instance[Type] with TypedTreeInfo {
   def Inlined(call: Tree, bindings: List[MemberDef], expansion: Tree)(using Context): Inlined =
     ta.assignType(untpd.Inlined(call, bindings, expansion), bindings, expansion)
 
-  def Quote(body: Tree)(using Context): Quote =
-    untpd.Quote(body).withBodyType(body.tpe)
+  def Quote(body: Tree, tags: List[Tree])(using Context): Quote =
+    untpd.Quote(body, tags).withBodyType(body.tpe)
 
   def Splice(expr: Tree, tpe: Type)(using Context): Splice =
     untpd.Splice(expr).withType(tpe)
+
+  def Hole(isTerm: Boolean, idx: Int, args: List[Tree], content: Tree, tpe: Type)(using Context): Hole =
+    untpd.Hole(isTerm, idx, args, content).withType(tpe)
 
   def TypeTree(tp: Type, inferred: Boolean = false)(using Context): TypeTree =
     (if inferred then untpd.InferredTypeTree() else untpd.TypeTree()).withType(tp)
@@ -396,9 +399,6 @@ object tpd extends Trees.Instance[Type] with TypedTreeInfo {
 
   def Throw(expr: Tree)(using Context): Tree =
     ref(defn.throwMethod).appliedTo(expr)
-
-  def Hole(isTermHole: Boolean, idx: Int, args: List[Tree], content: Tree, tpt: Tree)(using Context): Hole =
-    ta.assignType(untpd.Hole(isTermHole, idx, args, content, tpt), tpt)
 
   // ------ Making references ------------------------------------------------------
 

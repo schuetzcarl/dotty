@@ -1269,7 +1269,7 @@ class TreeUnpickler(reader: TastyReader,
 
       def quotedExpr(fn: Tree, args: List[Tree]): Tree =
         val TypeApply(_, targs) = fn: @unchecked
-        untpd.Quote(args.head).withBodyType(targs.head.tpe)
+        untpd.Quote(args.head, Nil).withBodyType(targs.head.tpe)
 
       def splicedExpr(fn: Tree, args: List[Tree]): Tree =
         val TypeApply(_, targs) = fn: @unchecked
@@ -1457,7 +1457,7 @@ class TreeUnpickler(reader: TastyReader,
               val idx = readNat()
               val tpe = readType()
               val args = until(end)(readTree())
-              Hole(true, idx, args, EmptyTree, TypeTree(tpe)).withType(tpe)
+              Hole(true, idx, args, EmptyTree, tpe)
             case _ =>
               readPathTree()
           }
@@ -1491,7 +1491,7 @@ class TreeUnpickler(reader: TastyReader,
           val idx = readNat()
           val tpe = readType()
           val args = until(end)(readTree())
-          Hole(false, idx, args, EmptyTree, TypeTree(tpe)).withType(tpe)
+          Hole(false, idx, args, EmptyTree, tpe)
         case _ =>
           if (isTypeTreeTag(nextByte)) readTree()
           else {

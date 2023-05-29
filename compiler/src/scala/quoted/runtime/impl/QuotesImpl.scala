@@ -45,7 +45,7 @@ class QuotesImpl private (using val ctx: Context) extends Quotes, QuoteUnpickler
       reflect.Printer.TreeCode.show(reflect.asTerm(self))
 
     def matches(that: scala.quoted.Expr[Any]): Boolean =
-      treeMatch(reflect.asTerm(self), reflect.asTerm(that)).nonEmpty
+      QuoteMatcher.treeMatch(reflect.asTerm(self), reflect.asTerm(that)).nonEmpty
 
     def valueOrAbort(using fromExpr: FromExpr[T]): T =
       def reportError =
@@ -2540,13 +2540,15 @@ class QuotesImpl private (using val ctx: Context) extends Quotes, QuoteUnpickler
       def newMethod(owner: Symbol, name: String, tpe: TypeRepr): Symbol =
         newMethod(owner, name, tpe, Flags.EmptyFlags, noSymbol)
       def newMethod(owner: Symbol, name: String, tpe: TypeRepr, flags: Flags, privateWithin: Symbol): Symbol =
-        assert(!privateWithin.exists || privateWithin.isType, "privateWithin must be a type symbol or `Symbol.noSymbol`")
+        xCheckMacroAssert(!privateWithin.exists || privateWithin.isType, "privateWithin must be a type symbol or `Symbol.noSymbol`")
+        val privateWithin1 = if privateWithin.isTerm then Symbol.noSymbol else privateWithin
         checkValidFlags(flags.toTermFlags, Flags.validMethodFlags)
-        dotc.core.Symbols.newSymbol(owner, name.toTermName, flags | dotc.core.Flags.Method, tpe, privateWithin)
+        dotc.core.Symbols.newSymbol(owner, name.toTermName, flags | dotc.core.Flags.Method, tpe, privateWithin1)
       def newVal(owner: Symbol, name: String, tpe: TypeRepr, flags: Flags, privateWithin: Symbol): Symbol =
-        assert(!privateWithin.exists || privateWithin.isType, "privateWithin must be a type symbol or `Symbol.noSymbol`")
+        xCheckMacroAssert(!privateWithin.exists || privateWithin.isType, "privateWithin must be a type symbol or `Symbol.noSymbol`")
+        val privateWithin1 = if privateWithin.isTerm then Symbol.noSymbol else privateWithin
         checkValidFlags(flags.toTermFlags, Flags.validValFlags)
-        dotc.core.Symbols.newSymbol(owner, name.toTermName, flags, tpe, privateWithin)
+        dotc.core.Symbols.newSymbol(owner, name.toTermName, flags, tpe, privateWithin1)
       def newBind(owner: Symbol, name: String, flags: Flags, tpe: TypeRepr): Symbol =
         checkValidFlags(flags.toTermFlags, Flags.validBindFlags)
         dotc.core.Symbols.newSymbol(owner, name.toTermName, flags | dotc.core.Flags.Case, tpe)
@@ -3026,12 +3028,16 @@ class QuotesImpl private (using val ctx: Context) extends Quotes, QuoteUnpickler
           t match
             case t: tpd.DefTree =>
               val defOwner = t.symbol.owner
-              assert(defOwner == owner,
+              assert(defOwner == owner, {
+                val ownerName = owner.fullName
+                val defOwnerName = defOwner.fullName
+                val duplicateSymbolHint =
+                  if ownerName == defOwnerName then "These are two different symbols instances with the same name. The symbol should have been instantiated only once.\n"
+                  else ""
                 s"""Tree had an unexpected owner for ${t.symbol}
                    |Expected: $owner (${owner.fullName})
                    |But was: $defOwner (${defOwner.fullName})
-                   |
-                   |
+                   |$duplicateSymbolHint
                    |The code of the definition of ${t.symbol} is
                    |${Printer.TreeCode.show(t)}
                    |
@@ -3045,7 +3051,8 @@ class QuotesImpl private (using val ctx: Context) extends Quotes, QuoteUnpickler
                    |
                    |Tip: The owner of a tree can be changed using method `Tree.changeOwner`.
                    |Tip: The default owner of definitions created in quotes can be changed using method `Symbol.asQuotes`.
-                   |""".stripMargin)
+                   |""".stripMargin
+              })
             case _ => traverseChildren(t)
       }.traverse(tree)
 
@@ -3152,65 +3159,14 @@ class QuotesImpl private (using val ctx: Context) extends Quotes, QuoteUnpickler
     def unapply[TypeBindings, Tup <: Tuple](scrutinee: scala.quoted.Expr[Any])(using pattern: scala.quoted.Expr[Any]): Option[Tup] =
       val scrutineeTree = reflect.asTerm(scrutinee)
       val patternTree = reflect.asTerm(pattern)
-      treeMatch(scrutineeTree, patternTree).asInstanceOf[Option[Tup]]
+      QuoteMatcher.treeMatch(scrutineeTree, patternTree).asInstanceOf[Option[Tup]]
   end ExprMatch
 
   object TypeMatch extends TypeMatchModule:
     def unapply[TypeBindings, Tup <: Tuple](scrutinee: scala.quoted.Type[?])(using pattern: scala.quoted.Type[?]): Option[Tup] =
       val scrutineeTree = reflect.TypeTree.of(using scrutinee)
       val patternTree = reflect.TypeTree.of(using pattern)
-      treeMatch(scrutineeTree, patternTree).asInstanceOf[Option[Tup]]
+      QuoteMatcher.treeMatch(scrutineeTree, patternTree).asInstanceOf[Option[Tup]]
   end TypeMatch
-
-  private def treeMatch(scrutinee: reflect.Tree, pattern: reflect.Tree): Option[Tuple] = {
-    import reflect._
-    def isTypeHoleDef(tree: Tree): Boolean =
-      tree match
-        case tree: TypeDef =>
-          tree.symbol.hasAnnotation(dotc.core.Symbols.defn.QuotedRuntimePatterns_patternTypeAnnot)
-        case _ => false
-
-    def extractTypeHoles(pat: Term): (Term, List[Symbol]) =
-      pat match
-        case tpd.Inlined(_, Nil, pat2) => extractTypeHoles(pat2)
-        case tpd.Block(stats @ ((typeHole: TypeDef) :: _), expr) if isTypeHoleDef(typeHole) =>
-          val holes = stats.takeWhile(isTypeHoleDef).map(_.symbol)
-          val otherStats = stats.dropWhile(isTypeHoleDef)
-          (tpd.cpy.Block(pat)(otherStats, expr), holes)
-        case _ =>
-          (pat, Nil)
-
-    val (pat1, typeHoles) = extractTypeHoles(pattern)
-
-    val ctx1 =
-      if typeHoles.isEmpty then ctx
-      else
-        val ctx1 = ctx.fresh.setFreshGADTBounds.addMode(dotc.core.Mode.GadtConstraintInference)
-        ctx1.gadtState.addToConstraint(typeHoles)
-        ctx1
-
-    // After matching and doing all subtype checks, we have to approximate all the type bindings
-    // that we have found, seal them in a quoted.Type and add them to the result
-    def typeHoleApproximation(sym: Symbol) =
-      val fromAboveAnnot = sym.hasAnnotation(dotc.core.Symbols.defn.QuotedRuntimePatterns_fromAboveAnnot)
-      val fullBounds = ctx1.gadt.fullBounds(sym)
-      if fromAboveAnnot then fullBounds.hi else fullBounds.lo
-
-    QuoteMatcher.treeMatch(scrutinee, pat1)(using ctx1).map { matchings =>
-      import QuoteMatcher.MatchResult.*
-      lazy val spliceScope = SpliceScope.getCurrent
-      val typeHoleApproximations = typeHoles.map(typeHoleApproximation)
-      val typeHoleMapping = Map(typeHoles.zip(typeHoleApproximations)*)
-      val typeHoleMap = new Types.TypeMap {
-          def apply(tp: Types.Type): Types.Type = tp match
-            case Types.TypeRef(Types.NoPrefix, _) => typeHoleMapping.getOrElse(tp.typeSymbol, tp)
-            case _ => mapOver(tp)
-      }
-      val matchedExprs = matchings.map(_.toExpr(typeHoleMap, spliceScope))
-      val matchedTypes = typeHoleApproximations.map(reflect.TypeReprMethods.asType)
-      val results = matchedTypes ++ matchedExprs
-      Tuple.fromIArray(IArray.unsafeFromArray(results.toArray))
-    }
-  }
 
 end QuotesImpl
