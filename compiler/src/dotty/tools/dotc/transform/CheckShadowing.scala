@@ -68,7 +68,8 @@ class CheckShadowing extends MiniPhase:
     )
     tree
 
-  // MiniPhase traversal work :
+  // MiniPhase traversal :
+
   override def prepareForPackageDef(tree: tpd.PackageDef)(using Context): Context =
     shadowingDataApply(sd => sd.inNewScope())
     ctx
@@ -124,12 +125,15 @@ class CheckShadowing extends MiniPhase:
   // Helpers :
 
   private def reportShadowing(res: ShadowingData.ShadowResult)(using Context): Unit =
-    res.warnings.sortBy(w => w.pos.line)(using Ordering[Int]).foreach { s =>
+    res.warnings.sortBy(w => (w.pos.line, w.pos.startPos.column))(using Ordering[(Int, Int)]).foreach { s =>
       s match
         case PrivateShadowWarning(pos, shadow, shadowed) =>
-          report.warning(s"${shadow.showLocated} shadows ${shadowed} inherited from ${shadowed.owner}", pos)
+          report.warning(s"${shadow.showLocated} shadows field ${shadowed.name} inherited from ${shadowed.owner}", pos)
         case TypeParamShadowWarning(pos, shadow, parent, shadowed) =>
-          report.warning(s"Type parameter ${shadow.name} defined for $parent shadows ${shadowed.showLocated}", pos)
+          if shadowed.exists then
+            report.warning(s"Type parameter ${shadow.name} for $parent shadows the type defined by ${shadowed.showLocated}", pos)
+          else
+            report.warning(s"Type parameter ${shadow.name} for $parent shadows an explicitly renamed type : ${shadow.name}", pos)
       }
 
   private def nestedTypeTraverser(parent: Symbol) = new TreeTraverser:
@@ -173,7 +177,7 @@ object CheckShadowing:
 
     private val rootImports = MutSet[SingleDenotation]()
     private val explicitsImports = MutStack[MutSet[tpd.Import]]()
-    private val renamedImports = MutStack[MutMap[SimpleName, Name]]() // Renamed -> original name
+    private val renamedImports = MutStack[MutMap[SimpleName, Name]]() // original name -> renamed name
 
     private val typeParamCandidates = MutMap[Symbol, Seq[tpd.TypeDef]]().withDefaultValue(Seq())
     private val shadowedTypeDefs = MutSet[TypeParamShadowWarning]()
@@ -190,7 +194,9 @@ object CheckShadowing:
 
     /** Register the Root imports (at once per compilation unit)*/
     def registerRootImports()(using Context) =
-      rootImports.addAll(ctx.definitions.rootImportTypes.flatMap(_.typeMembers))
+      ctx.definitions.rootImportTypes.foreach(rimp => println())
+      val langPackageName = ctx.definitions.JavaLangPackageVal.name.toSimpleName // excludes lang package
+      rootImports.addAll(ctx.definitions.rootImportTypes.withFilter(_.name.toSimpleName != langPackageName).flatMap(_.typeMembers))
 
     /* Register an import encountered in the current scope **/
     def registerImport(imp: tpd.Import)(using Context) =
@@ -214,10 +220,10 @@ object CheckShadowing:
             lookForRootShadowedType(sym)
               .orElse(lookForImportedShadowedType(sym))
               .orElse(lookForUnitShadowedType(sym))
-          shadowedType.foreach(shadowed => {
+          shadowedType.foreach(shadowed =>
             if !renamedImports.exists(_.contains(shadowed.name.toSimpleName)) then
               shadowedTypeDefs += TypeParamShadowWarning(typeDef.srcPos, typeDef.symbol, parent, shadowed)
-          })
+          )
         })
 
     private def lookForRootShadowedType(symbol: Symbol)(using Context): Option[Symbol] =
@@ -240,8 +246,8 @@ object CheckShadowing:
 
     /** Register if the valDef is a private declaration that shadows an inherited field */
     def registerPrivateShadows(valDef: tpd.ValDef)(using Context): Unit =
-      lookForShadowedField(valDef.symbol).foreach(overridenSymbol =>
-        shadowedPrivateDefs += PrivateShadowWarning(valDef.startPos, valDef.symbol, overridenSymbol)
+      lookForShadowedField(valDef.symbol).foreach(shadowedField =>
+        shadowedPrivateDefs += PrivateShadowWarning(valDef.startPos, valDef.symbol, shadowedField)
       )
 
     private def lookForShadowedField(symDecl: Symbol)(using Context): Option[Symbol] =
